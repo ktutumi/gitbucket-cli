@@ -1,0 +1,39 @@
+# --- Go / build ---
+# README 記載の build コマンド (go build -o bkt ./cmd/bkt) の成果物
+/bkt
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# テストカバレッジ・解析成果物
+coverage.out
+coverage.html
+*.coverprofile
+*.out
+
+# --- 環境 / シークレット ---
+.env
+.env.local
+.env.*.local
+*.env
+*.key
+*.pem
+
+# --- ログ ---
+*.log
+*.tmp
+
+# --- エディタ ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- OS ---
+Thumbs.db
