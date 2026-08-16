@@ -2,25 +2,35 @@
 
 package state
 
-import "syscall"
+import (
+	"fmt"
 
-const (
-	lockEx = 0
-	lockNb = 0
-	lockUn = 0
+	"golang.org/x/sys/windows"
 )
 
-var (
-	errWouldBlock = syscall.Errno(0)
-	errAgain      = syscall.Errno(0)
+const (
+	lockEx = windows.LOCKFILE_EXCLUSIVE_LOCK
+	lockNb = windows.LOCKFILE_FAIL_IMMEDIATELY
+	lockUn = 0
+
+	errWouldBlock = windows.ERROR_LOCK_VIOLATION
+	errAgain      = windows.ERROR_LOCK_VIOLATION
 )
 
 func flock(fd uintptr, how int) error {
-	return errUnsupported
-}
-
-func unlock(fd uintptr) error {
+	var overlapped windows.Overlapped
+	err := windows.LockFileEx(windows.Handle(fd), uint32(how), 0, 1, 0, &overlapped)
+	if err != nil {
+		return fmt.Errorf("lock file: %w", err)
+	}
 	return nil
 }
 
-var errUnsupported = syscall.Errno(1 << 30)
+func unlock(fd uintptr) error {
+	var overlapped windows.Overlapped
+	err := windows.UnlockFileEx(windows.Handle(fd), 0, 1, 0, &overlapped)
+	if err != nil {
+		return fmt.Errorf("unlock file: %w", err)
+	}
+	return nil
+}

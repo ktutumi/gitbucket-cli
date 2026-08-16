@@ -23,6 +23,7 @@ func TestNormalizeURLEquivalence(t *testing.T) {
 		"http://gitbucket.example:80",
 		"http://gitbucket.example/",
 		"http://gitbucket.example//",
+		"http://gitbucket.example///",
 		"http://gitbucket.example/?query=1#frag",
 	}
 	for _, v := range variants {
@@ -33,8 +34,8 @@ func TestNormalizeURLEquivalence(t *testing.T) {
 	if got := normalized("https://gitbucket.example:443/"); got != "https://gitbucket.example/" {
 		t.Fatalf("https default port: %q", got)
 	}
-	if got := normalized("https://gitbucket.example:8080/path/"); got != "https://gitbucket.example:8080/path" {
-		t.Fatalf("non-default port + trailing slash: %q", got)
+	if got := normalized("https://gitbucket.example:8080/gitbucket///app/"); got != "https://gitbucket.example:8080/gitbucket/app" {
+		t.Fatalf("non-default port + repeated and trailing slashes: %q", got)
 	}
 	if got := normalized("https://[2001:db8::1]:443/"); got != "https://[2001:db8::1]/" {
 		t.Fatalf("IPv6 default port: %q", got)

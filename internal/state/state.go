@@ -64,7 +64,9 @@ func NormalizeURL(raw string) (string, error) {
 	}
 
 	path := parsed.EscapedPath()
-	path = strings.ReplaceAll(path, "//", "/")
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
 	path = strings.TrimRight(path, "/")
 	if path == "" {
 		path = "/"
