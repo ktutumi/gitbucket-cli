@@ -2,6 +2,7 @@ package legacy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -84,6 +85,70 @@ func TestCreateIssueUncertaintySuppressesRepost(t *testing.T) {
 	}
 	if server.creates != creates {
 		t.Fatalf("unsafe re-POST: creates %d -> %d", creates, server.creates)
+	}
+}
+
+func TestCreateIssueLostResponseMultipleMatchesIsAmbiguous(t *testing.T) {
+	server := newLegacyServer(t, "")
+	server.dropCreate = true
+	server.dropInserts = 2
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateIssue(context.Background(), state.NewManager(t.TempDir()), CreateIssueRequest{
+		Owner:       "acme",
+		Repo:        "widgets",
+		Title:       "Task",
+		Body:        "Asana-Task-ID: 99\n",
+		MarkerLabel: "Asana-Task-ID",
+		DedupeKey:   "99",
+	})
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("err = %v, want ErrAmbiguous", err)
+	}
+}
+
+func TestCreateIssuePostCreateMultipleMatchesIsAmbiguous(t *testing.T) {
+	server := newLegacyServer(t, "")
+	server.extraCreates = 1
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateIssue(context.Background(), state.NewManager(t.TempDir()), CreateIssueRequest{
+		Owner:       "acme",
+		Repo:        "widgets",
+		Title:       "Task",
+		Body:        "Asana-Task-ID: 99\n",
+		MarkerLabel: "Asana-Task-ID",
+		DedupeKey:   "99",
+	})
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("err = %v, want ErrAmbiguous", err)
+	}
+}
+
+func TestCreateIssueResultJSONKeys(t *testing.T) {
+	data, err := json.Marshal(CreateIssueResult{Number: 12, URL: "https://gitbucket/acme/widgets/issues/12", Reused: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"number":   float64(12),
+		"html_url": "https://gitbucket/acme/widgets/issues/12",
+		"reused":   true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("keys = %v, want %v; payload = %s", got, want, data)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("json[%q] = %#v, want %#v; payload = %s", key, got[key], value, data)
+		}
+	}
+	for _, leaked := range []string{"Number", "URL", "Reused"} {
+		if _, ok := got[leaked]; ok {
+			t.Fatalf("exported Go name %q leaked: %s", leaked, data)
+		}
 	}
 }
 

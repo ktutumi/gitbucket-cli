@@ -2,6 +2,7 @@ package legacy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -83,5 +84,33 @@ func TestCreatePullRequestKeepsContextRoot(t *testing.T) {
 	}
 	if strings.Contains(comparePath, "feature/api") {
 		t.Fatalf("compare path split feature/api into extra segments: %q", comparePath)
+	}
+}
+
+func TestCreatePullRequestResultJSONKeys(t *testing.T) {
+	data, err := json.Marshal(CreatePullRequestResult{Number: 7, URL: "https://gitbucket/acme/widgets/pull/7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"number":   float64(7),
+		"html_url": "https://gitbucket/acme/widgets/pull/7",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("keys = %v, want %v; payload = %s", got, want, data)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("json[%q] = %#v, want %#v; payload = %s", key, got[key], value, data)
+		}
+	}
+	for _, leaked := range []string{"Number", "URL", "Reused"} {
+		if _, ok := got[leaked]; ok {
+			t.Fatalf("exported Go name %q leaked: %s", leaked, data)
+		}
 	}
 }

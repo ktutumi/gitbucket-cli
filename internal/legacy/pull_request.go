@@ -22,8 +22,8 @@ type CreatePullRequestRequest struct {
 }
 
 type CreatePullRequestResult struct {
-	Number int
-	URL    string
+	Number int    `json:"number"`
+	URL    string `json:"html_url"`
 }
 
 func (c *Client) CreatePullRequest(ctx context.Context, req CreatePullRequestRequest) (*CreatePullRequestResult, error) {

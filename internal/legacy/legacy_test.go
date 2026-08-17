@@ -21,9 +21,11 @@ type legacyFixture struct {
 	prefix     string
 	issues     map[int]string
 	nextID     int
-	creates    int
-	dropCreate bool
-	baseSHA    string
+	creates      int
+	dropCreate   bool
+	dropInserts  int
+	extraCreates int
+	baseSHA      string
 	headSHA    string
 	baseBranch string
 	headBranch string
@@ -114,14 +116,25 @@ func (f *legacyFixture) handleIssueList(w http.ResponseWriter, r *http.Request) 
 
 func (f *legacyFixture) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 	f.creates++
+	_ = r.ParseForm()
+	content := r.PostFormValue("content")
+	insert := func() int {
+		id := f.nextID
+		f.nextID++
+		f.issues[id] = content
+		return id
+	}
 	if f.dropCreate {
+		for i := 0; i < f.dropInserts; i++ {
+			insert()
+		}
 		http.Error(w, "lost", http.StatusInternalServerError)
 		return
 	}
-	_ = r.ParseForm()
-	id := f.nextID
-	f.nextID++
-	f.issues[id] = r.PostFormValue("content")
+	id := insert()
+	for i := 0; i < f.extraCreates; i++ {
+		insert()
+	}
 	w.Header().Set("Location", f.loc(fmt.Sprintf("/acme/widgets/issues/%d", id)))
 	w.WriteHeader(http.StatusFound)
 }

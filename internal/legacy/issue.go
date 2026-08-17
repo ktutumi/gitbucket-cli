@@ -26,9 +26,9 @@ type CreateIssueRequest struct {
 }
 
 type CreateIssueResult struct {
-	Number int
-	URL    string
-	Reused bool
+	Number int    `json:"number"`
+	URL    string `json:"html_url"`
+	Reused bool   `json:"reused"`
 }
 
 func CountMarkers(body, label, value string) int {
@@ -101,7 +101,7 @@ func (c *Client) CreateIssue(ctx context.Context, mgr state.Manager, req CreateI
 		}
 		return &CreateIssueResult{Number: matches[0].Number, URL: matches[0].URL, Reused: true}, nil
 	case len(matches) > 1:
-		return nil, wrap(ErrAmbiguous, fmt.Sprintf("multiple issues contain marker %s: %s", dedupeKey, formatNumbers(matches)))
+		return nil, errAmbiguousMatches(dedupeKey, matches)
 	}
 
 	if hasRecord && !req.OverrideUncertainty {
@@ -116,11 +116,16 @@ func (c *Client) CreateIssue(ctx context.Context, mgr state.Manager, req CreateI
 	created, err := c.postIssue(ctx, req)
 	if err != nil {
 		matches, scanErr := c.scanMatchingIssues(ctx, req.Owner, req.Repo, label, dedupeKey)
-		if scanErr == nil && len(matches) == 1 {
-			if clearErr := mgr.ClearUncertainty(key); clearErr != nil {
-				return nil, clearErr
+		if scanErr == nil {
+			switch {
+			case len(matches) == 1:
+				if clearErr := mgr.ClearUncertainty(key); clearErr != nil {
+					return nil, clearErr
+				}
+				return &CreateIssueResult{Number: matches[0].Number, URL: matches[0].URL, Reused: true}, nil
+			case len(matches) > 1:
+				return nil, errAmbiguousMatches(dedupeKey, matches)
 			}
-			return &CreateIssueResult{Number: matches[0].Number, URL: matches[0].URL, Reused: true}, nil
 		}
 		return nil, wrap(ErrUncertainty, "issue creation response was lost; uncertainty record retained")
 	}
@@ -129,7 +134,13 @@ func (c *Client) CreateIssue(ctx context.Context, mgr state.Manager, req CreateI
 		return nil, err
 	}
 	matches, err = c.scanMatchingIssues(ctx, req.Owner, req.Repo, label, dedupeKey)
-	if err != nil || len(matches) != 1 || matches[0].Number != created.Number {
+	if err != nil {
+		return nil, wrap(ErrUncertainty, "post-create scan did not confirm the created issue; uncertainty record retained")
+	}
+	if len(matches) > 1 {
+		return nil, errAmbiguousMatches(dedupeKey, matches)
+	}
+	if len(matches) != 1 || matches[0].Number != created.Number {
 		return nil, wrap(ErrUncertainty, "post-create scan did not confirm the created issue; uncertainty record retained")
 	}
 	if err := mgr.ClearUncertainty(key); err != nil {
@@ -267,6 +278,10 @@ func (c *Client) issueURL(owner, repo string, number int) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+func errAmbiguousMatches(dedupeKey string, matches []scannedIssue) error {
+	return wrap(ErrAmbiguous, fmt.Sprintf("multiple issues contain marker %s: %s", dedupeKey, formatNumbers(matches)))
 }
 
 func formatNumbers(matches []scannedIssue) string {
