@@ -15,12 +15,16 @@ type Config struct {
 }
 
 type HostConfig struct {
-	Token string `json:"token,omitempty"`
+	Token  string `json:"token,omitempty"`
+	Legacy bool   `json:"legacy,omitempty"`
+	User   string `json:"user,omitempty"`
 }
 
 type Resolved struct {
-	URL   string
-	Token string
+	URL    string
+	Token  string
+	Legacy bool
+	User   string
 }
 
 type Store struct {
@@ -94,9 +98,21 @@ func Resolve(cfg Config, env map[string]string, explicitURL string) (Resolved, e
 		return Resolved{}, errors.New("GitBucket URL is required; set --url, GITBUCKET_URL, or run auth login")
 	}
 
+	host := HostConfig{}
+	if cfg.Hosts != nil {
+		host = cfg.Hosts[url]
+	}
+
+	if host.Legacy {
+		if host.User == "" {
+			return Resolved{}, errors.New("legacy GitBucket sign-in name is required; run auth login --legacy --user")
+		}
+		return Resolved{URL: url, Legacy: true, User: host.User}, nil
+	}
+
 	token := env["GITBUCKET_TOKEN"]
-	if token == "" && cfg.Hosts != nil {
-		token = cfg.Hosts[url].Token
+	if token == "" {
+		token = host.Token
 	}
 	if token == "" {
 		return Resolved{}, errors.New("GitBucket token is required; set --token, GITBUCKET_TOKEN, or run auth login")
