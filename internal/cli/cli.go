@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/ktutumi/gitbucket-cli/internal/config"
 	"github.com/ktutumi/gitbucket-cli/internal/gitbucket"
+	"github.com/ktutumi/gitbucket-cli/internal/legacy"
+	"github.com/ktutumi/gitbucket-cli/internal/state"
 )
 
 const version = "0.1.0"
@@ -25,6 +28,7 @@ type Options struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
 	ConfigPath string
+	StateDir   string
 	Env        map[string]string
 	WorkDir    string
 
@@ -43,17 +47,33 @@ func Run(ctx context.Context, args []string, opts Options) int {
 	runner := newRunner(opts)
 	if err := runner.run(ctx, args); err != nil {
 		fmt.Fprintln(runner.stderr, "bkt:", err)
-		return 1
+		return exitCode(err)
 	}
 	return 0
 }
 
+func exitCode(err error) int {
+	switch {
+	case errors.Is(err, legacy.ErrUncertainty):
+		return 2
+	case errors.Is(err, legacy.ErrAmbiguous):
+		return 3
+	case errors.Is(err, legacy.ErrAuth):
+		return 4
+	case errors.Is(err, legacy.ErrValidation):
+		return 5
+	default:
+		return 1
+	}
+}
+
 type runner struct {
-	stdout  io.Writer
-	stderr  io.Writer
-	store   config.Store
-	env     map[string]string
-	workDir string
+	stdout   io.Writer
+	stderr   io.Writer
+	store    config.Store
+	stateDir string
+	env      map[string]string
+	workDir  string
 
 	httpClient  *http.Client
 	runCommand  func(context.Context, string, ...string) error
@@ -70,7 +90,7 @@ func newRunner(opts Options) *runner {
 		stderr = os.Stderr
 	}
 	env := map[string]string{}
-	for _, key := range []string{"GITBUCKET_URL", "GITBUCKET_TOKEN", "GITBUCKET_REPO"} {
+	for _, key := range []string{"GITBUCKET_URL", "GITBUCKET_TOKEN", "GITBUCKET_REPO", "GITBUCKET_PASSWORD"} {
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
 		}
@@ -90,6 +110,7 @@ func newRunner(opts Options) *runner {
 		stdout:      stdout,
 		stderr:      stderr,
 		store:       config.NewStore(opts.ConfigPath),
+		stateDir:    opts.StateDir,
 		env:         env,
 		workDir:     opts.WorkDir,
 		httpClient:  opts.HTTPClient,
@@ -119,6 +140,8 @@ func (r *runner) run(ctx context.Context, args []string) error {
 		return r.runAuth(ctx, rest[1:], globals)
 	case "commit":
 		return r.runCommit(ctx, rest[1:], globals)
+	case "issue":
+		return r.runIssue(ctx, rest[1:], globals)
 	case "pr":
 		return r.runPR(ctx, rest[1:], globals)
 	default:
@@ -163,6 +186,8 @@ func (r *runner) runAuth(ctx context.Context, args []string, g globals) error {
 		fs.StringVar(token, "t", "", "personal access token")
 		urlValue := fs.String("url", g.url, "GitBucket URL")
 		fs.StringVar(urlValue, "u", g.url, "GitBucket URL")
+		legacyMode := fs.Bool("legacy", false, "declare a legacy GitBucket host")
+		user := fs.String("user", "", "legacy sign-in name")
 		if err := parseFlags(fs, args[1:]); err != nil {
 			return err
 		}
@@ -170,16 +195,30 @@ func (r *runner) runAuth(ctx context.Context, args []string, g globals) error {
 		if url == "" {
 			return errors.New("--url is required")
 		}
+		cfg, err := r.store.Load()
+		if err != nil {
+			return err
+		}
+		if *legacyMode {
+			if strings.TrimSpace(*token) != "" {
+				return wrapValidation("legacy login does not accept --token")
+			}
+			if strings.TrimSpace(*user) == "" {
+				return wrapValidation("--user is required for legacy login")
+			}
+			cfg = config.UpsertHost(cfg, url, config.HostConfig{Legacy: true, User: strings.TrimSpace(*user)})
+			if err := r.store.Save(cfg); err != nil {
+				return err
+			}
+			fmt.Fprintf(r.stdout, "Logged in to %s\n", url)
+			return nil
+		}
 		tokenValue := *token
 		if tokenValue == "" {
 			tokenValue = r.env["GITBUCKET_TOKEN"]
 		}
 		if tokenValue == "" {
 			return errors.New("--token or GITBUCKET_TOKEN is required")
-		}
-		cfg, err := r.store.Load()
-		if err != nil {
-			return err
 		}
 		cfg = config.UpsertHost(cfg, url, config.HostConfig{Token: tokenValue})
 		if err := r.store.Save(cfg); err != nil {
@@ -194,6 +233,21 @@ func (r *runner) runAuth(ctx context.Context, args []string, g globals) error {
 		jsonOut := fs.Bool("json", g.json, "output JSON")
 		if err := parseFlags(fs, args[1:]); err != nil {
 			return err
+		}
+		resolved, err := r.resolveHost(*urlValue)
+		if err != nil {
+			return err
+		}
+		if resolved.Legacy {
+			if *jsonOut {
+				return writeJSON(r.stdout, map[string]any{
+					"url":    resolved.URL,
+					"legacy": true,
+					"user":   resolved.User,
+				})
+			}
+			fmt.Fprintf(r.stdout, "Logged in to %s as %s (legacy; verified on command)\n", resolved.URL, resolved.User)
+			return nil
 		}
 		client, resolved, err := r.client(ctx, *urlValue)
 		if err != nil {
@@ -360,6 +414,77 @@ func (r *runner) runCommit(ctx context.Context, args []string, g globals) error 
 	}
 }
 
+func (r *runner) runIssue(ctx context.Context, args []string, g globals) error {
+	if len(args) == 0 {
+		return errors.New("issue subcommand is required")
+	}
+	switch args[0] {
+	case "create":
+		fs := newFlagSet("issue create", r.stderr)
+		repoValue := fs.String("repo", g.repo, "repository owner/name")
+		fs.StringVar(repoValue, "R", g.repo, "repository owner/name")
+		title := fs.String("title", "", "title")
+		fs.StringVar(title, "t", "", "title")
+		body := fs.String("body", "", "body")
+		fs.StringVar(body, "b", "", "body")
+		bodyFile := fs.String("body-file", "", "body file")
+		fs.StringVar(bodyFile, "F", "", "body file")
+		markerLabel := fs.String("marker-label", "", "idempotent marker label")
+		dedupeKey := fs.String("dedupe-key", "", "idempotent marker value")
+		override := fs.Bool("override-uncertainty", false, "allow create when an uncertainty record exists")
+		password := fs.String("password", "", "legacy GitBucket password")
+		jsonOut := fs.Bool("json", g.json, "output JSON")
+		if err := parseFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		resolved, err := r.resolveHost(g.url)
+		if err != nil {
+			return err
+		}
+		if !resolved.Legacy {
+			return wrapUnsupported("issue create is only supported on a legacy GitBucket host")
+		}
+		bodyText, err := readMessage(*body, *bodyFile)
+		if err != nil {
+			return err
+		}
+		repo, err := r.resolveRepo(ctx, *repoValue)
+		if err != nil {
+			return err
+		}
+		client, err := r.legacyClient(resolved, r.password(*password))
+		if err != nil {
+			return err
+		}
+		result, err := client.CreateIssue(ctx, state.NewManager(r.stateDir), legacy.CreateIssueRequest{
+			Owner:               repo.Owner,
+			Repo:                repo.Name,
+			Title:               *title,
+			Body:                bodyText,
+			MarkerLabel:         *markerLabel,
+			DedupeKey:           *dedupeKey,
+			OverrideUncertainty: *override,
+		})
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return writeJSON(r.stdout, result)
+		}
+		if result.Reused {
+			fmt.Fprintf(r.stdout, "Reused issue #%d\n", result.Number)
+		} else {
+			fmt.Fprintf(r.stdout, "Created issue #%d\n", result.Number)
+		}
+		if result.URL != "" {
+			fmt.Fprintln(r.stdout, result.URL)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown issue subcommand %q", args[0])
+	}
+}
+
 func (r *runner) runPR(ctx context.Context, args []string, g globals) error {
 	if len(args) == 0 {
 		return errors.New("pr subcommand is required")
@@ -379,14 +504,66 @@ func (r *runner) runPR(ctx context.Context, args []string, g globals) error {
 		fs.StringVar(base, "B", "main", "base branch")
 		head := fs.String("head", "", "head branch")
 		fs.StringVar(head, "H", "", "head branch")
+		baseSHA := fs.String("base-sha", "", "caller-fixed base commit SHA")
+		headSHA := fs.String("head-sha", "", "caller-fixed head commit SHA")
+		password := fs.String("password", "", "legacy GitBucket password")
 		web := fs.Bool("web", false, "open in browser")
 		fs.BoolVar(web, "w", false, "open in browser")
 		jsonOut := fs.Bool("json", g.json, "output JSON")
 		if err := parseFlags(fs, args[1:]); err != nil {
 			return err
 		}
-		if *title == "" {
+		resolved, err := r.resolveHost(g.url)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*title) == "" {
+			if resolved.Legacy {
+				return wrapValidation("--title is required")
+			}
 			return errors.New("--title is required")
+		}
+		bodyText, err := readMessage(*body, *bodyFile)
+		if err != nil {
+			return err
+		}
+		if resolved.Legacy {
+			supplied := visitedFlags(fs)
+			if !flagSetHas(supplied, "base", "B") || !flagSetHas(supplied, "head", "H") || !flagSetHas(supplied, "base-sha") || !flagSetHas(supplied, "head-sha") {
+				return wrapValidation("--base, --head, --base-sha, and --head-sha are required")
+			}
+			repo, err := r.resolveRepo(ctx, *repoValue)
+			if err != nil {
+				return err
+			}
+			client, err := r.legacyClient(resolved, r.password(*password))
+			if err != nil {
+				return err
+			}
+			pr, err := client.CreatePullRequest(ctx, legacy.CreatePullRequestRequest{
+				Owner:   repo.Owner,
+				Repo:    repo.Name,
+				Title:   *title,
+				Body:    bodyText,
+				Base:    *base,
+				Head:    *head,
+				BaseSHA: *baseSHA,
+				HeadSHA: *headSHA,
+			})
+			if err != nil {
+				return err
+			}
+			if *jsonOut {
+				return writeJSON(r.stdout, pr)
+			}
+			fmt.Fprintf(r.stdout, "Created pull request #%d\n", pr.Number)
+			if pr.URL != "" {
+				fmt.Fprintln(r.stdout, pr.URL)
+			}
+			return nil
+		}
+		if *baseSHA != "" || *headSHA != "" {
+			return errors.New("--base-sha and --head-sha are only valid on a legacy GitBucket host")
 		}
 		if *head == "" {
 			current, err := r.currentBranch(ctx)
@@ -394,10 +571,6 @@ func (r *runner) runPR(ctx context.Context, args []string, g globals) error {
 				return errors.New("--head is required when current git branch cannot be detected")
 			}
 			*head = current
-		}
-		bodyText, err := readMessage(*body, *bodyFile)
-		if err != nil {
-			return err
 		}
 		client, repo, err := r.clientAndRepo(ctx, g.url, *repoValue)
 		if err != nil {
@@ -571,14 +744,21 @@ func (r *runner) runPR(ctx context.Context, args []string, g globals) error {
 	}
 }
 
-func (r *runner) client(ctx context.Context, explicitURL string) (*gitbucket.Client, config.Resolved, error) {
+func (r *runner) resolveHost(explicitURL string) (config.Resolved, error) {
 	cfg, err := r.store.Load()
+	if err != nil {
+		return config.Resolved{}, err
+	}
+	return config.Resolve(cfg, r.env, explicitURL)
+}
+
+func (r *runner) client(ctx context.Context, explicitURL string) (*gitbucket.Client, config.Resolved, error) {
+	resolved, err := r.resolveHost(explicitURL)
 	if err != nil {
 		return nil, config.Resolved{}, err
 	}
-	resolved, err := config.Resolve(cfg, r.env, explicitURL)
-	if err != nil {
-		return nil, config.Resolved{}, err
+	if resolved.Legacy {
+		return nil, config.Resolved{}, wrapUnsupported("command is not supported on a legacy GitBucket host")
 	}
 	opts := []gitbucket.Option{}
 	if r.httpClient != nil {
@@ -604,25 +784,89 @@ func (r *runner) clientAndRepo(ctx context.Context, explicitURL, explicitRepo st
 	return client, repo, nil
 }
 
+func (r *runner) legacyClient(resolved config.Resolved, password string) (*legacy.Client, error) {
+	opts := []legacy.Option{}
+	if r.httpClient != nil {
+		opts = append(opts, legacy.WithHTTPClient(r.httpClient))
+	}
+	return legacy.NewClient(resolved.URL, resolved.User, password, opts...)
+}
+
+func (r *runner) password(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return r.env["GITBUCKET_PASSWORD"]
+}
+
 func (r *runner) resolveRepo(ctx context.Context, explicitRepo string) (gitbucket.Repo, error) {
 	value := explicitRepo
 	if value == "" {
 		value = r.env["GITBUCKET_REPO"]
 	}
 	if value == "" {
-		return gitbucket.Repo{}, errors.New("repository is required; pass --repo owner/name or set GITBUCKET_REPO")
+		remote, err := r.originRemote(ctx)
+		if err != nil {
+			return gitbucket.Repo{}, errors.New("repository is required; pass --repo owner/name or set GITBUCKET_REPO")
+		}
+		value = remote
 	}
-	_ = ctx
 	return parseRepo(value)
 }
 
+func (r *runner) originRemote(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
+	if r.workDir != "" {
+		cmd.Dir = r.workDir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	remote := strings.TrimSpace(string(out))
+	if remote == "" {
+		return "", errors.New("origin remote is empty")
+	}
+	return remote, nil
+}
+
 func parseRepo(value string) (gitbucket.Repo, error) {
-	value = strings.Trim(strings.TrimSpace(value), "/")
-	parts := strings.Split(value, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return gitbucket.Repo{}, fmt.Errorf("repository must be owner/name, got %q", value)
 	}
-	return gitbucket.Repo{Owner: parts[0], Name: parts[1]}, nil
+	if !strings.Contains(value, "://") && !strings.Contains(value, "@") {
+		value = strings.Trim(value, "/")
+		parts := strings.Split(value, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return gitbucket.Repo{}, fmt.Errorf("repository must be owner/name, got %q", value)
+		}
+		return gitbucket.Repo{Owner: parts[0], Name: strings.TrimSuffix(parts[1], ".git")}, nil
+	}
+
+	path := remotePath(value)
+	path = strings.TrimSuffix(path, ".git")
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || parts[len(parts)-2] == "" || parts[len(parts)-1] == "" {
+		return gitbucket.Repo{}, fmt.Errorf("repository must be owner/name, got %q", value)
+	}
+	return gitbucket.Repo{Owner: parts[len(parts)-2], Name: parts[len(parts)-1]}, nil
+}
+
+func remotePath(value string) string {
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return value
+		}
+		return parsed.Path
+	}
+	_, rest, ok := strings.Cut(value, ":")
+	if !ok {
+		return value
+	}
+	return rest
 }
 
 func (r *runner) existingContentSHA(ctx context.Context, client *gitbucket.Client, repo gitbucket.Repo, path, branch string) (string, error) {
@@ -661,6 +905,31 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
 	return fs.Parse(interspersedFlagsFirst(fs, args))
+}
+
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		seen[f.Name] = true
+	})
+	return seen
+}
+
+func flagSetHas(seen map[string]bool, names ...string) bool {
+	for _, name := range names {
+		if seen[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func wrapUnsupported(msg string) error {
+	return fmt.Errorf("%w: %s", legacy.ErrUnsupported, msg)
+}
+
+func wrapValidation(msg string) error {
+	return fmt.Errorf("%w: %s", legacy.ErrValidation, msg)
 }
 
 func interspersedFlagsFirst(fs *flag.FlagSet, args []string) []string {
@@ -829,6 +1098,7 @@ Usage:
 Commands:
   auth      Manage authentication
   commit    View commits and create single-file commits through Contents API
+  issue     Create issues on a legacy GitBucket host
   pr        Work with pull requests
 
 Global flags:
