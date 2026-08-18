@@ -64,6 +64,60 @@ func TestResolveEnvironmentOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestResolveLegacyHostDoesNotRequireToken(t *testing.T) {
+	cfg := Config{
+		DefaultURL: "https://legacy.example.com",
+		Hosts: map[string]HostConfig{
+			"https://legacy.example.com": {Legacy: true, User: "root"},
+		},
+	}
+
+	resolved, err := Resolve(cfg, nil, "")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if !resolved.Legacy {
+		t.Fatalf("Legacy = false")
+	}
+	if resolved.User != "root" {
+		t.Fatalf("User = %q", resolved.User)
+	}
+	if resolved.Token != "" {
+		t.Fatalf("Token = %q, want empty", resolved.Token)
+	}
+}
+
+func TestResolveLegacyHostIgnoresToken(t *testing.T) {
+	cfg := Config{
+		DefaultURL: "https://legacy.example.com",
+		Hosts: map[string]HostConfig{
+			"https://legacy.example.com": {Legacy: true, User: "root", Token: "stale-token"},
+		},
+	}
+	env := map[string]string{"GITBUCKET_TOKEN": "env-token"}
+
+	resolved, err := Resolve(cfg, env, "")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if resolved.Token != "" {
+		t.Fatalf("Token = %q, want empty on legacy host", resolved.Token)
+	}
+}
+
+func TestResolveLegacyHostRequiresSignInName(t *testing.T) {
+	cfg := Config{
+		DefaultURL: "https://legacy.example.com",
+		Hosts: map[string]HostConfig{
+			"https://legacy.example.com": {Legacy: true},
+		},
+	}
+
+	if _, err := Resolve(cfg, nil, ""); err == nil {
+		t.Fatal("Resolve succeeded without a sign-in name")
+	}
+}
+
 func TestResolveUsesExplicitURLAndMatchingHostToken(t *testing.T) {
 	cfg := Config{
 		DefaultURL: "https://default.example.com",
