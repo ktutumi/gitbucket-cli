@@ -581,9 +581,14 @@ func TestPRCreateNonLegacyRejectsSHAFlags(t *testing.T) {
 func TestLegacyUnsupportedCommand(t *testing.T) {
 	server := newCLILegacyServer(t)
 	opts := legacyCLIOptions(t, server)
+	var errOut bytes.Buffer
+	opts.Stderr = &errOut
 	code := Run(context.Background(), []string{"--repo", "acme/widgets", "commit", "list"}, opts)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if got := strings.Count(errOut.String(), "command is not supported"); got != 1 {
+		t.Errorf("unsupported message repeated: %s", errOut.String())
 	}
 }
 
@@ -627,7 +632,11 @@ func (f *cliLegacyServer) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		w.Header().Set("Location", "/")
+		if r.FormValue("password") != "secret" {
+			w.Header().Set("Location", "/signin")
+		} else {
+			w.Header().Set("Location", "/")
+		}
 		w.WriteHeader(http.StatusFound)
 	case r.URL.Path == "/acme/widgets/issues":
 		page := r.URL.Query().Get("page")
@@ -713,5 +722,29 @@ func initGitRepo(t *testing.T, dir, branch, remote string) {
 	runGit("commit", "-m", "init")
 	if remote != "" {
 		runGit("remote", "add", "origin", remote)
+	}
+}
+
+func TestLegacyWrongPasswordStopsBeforeRepositoryAccess(t *testing.T) {
+	for _, command := range [][]string{
+		{"issue", "create", "--title", "Task", "--body", "Task-ID: 99", "--marker-label", "Task-ID", "--dedupe-key", "99"},
+		{"pr", "create", "--title", "Task", "--base", "main", "--head", "feature/api", "--base-sha", strings.Repeat("1", 40), "--head-sha", strings.Repeat("2", 40)},
+	} {
+		t.Run(command[0], func(t *testing.T) {
+			server := newCLILegacyServer(t)
+			opts := legacyCLIOptions(t, server)
+			args := append([]string{"--repo", "acme/widgets"}, command...)
+			args = append(args, "--password", "wrong")
+			if code := Run(context.Background(), args, opts); code != 4 {
+				t.Fatalf("exit code = %d, want 4", code)
+			}
+			if got := strings.Join(server.reqs, ","); got != "GET /signin,POST /signin" {
+				t.Fatalf("unexpected repository access: %s", got)
+			}
+			records, err := filepath.Glob(filepath.Join(opts.StateDir, "*.json"))
+			if err != nil || len(records) != 0 {
+				t.Fatalf("uncertainty records = %v, err = %v", records, err)
+			}
+		})
 	}
 }

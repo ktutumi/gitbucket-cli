@@ -2,8 +2,10 @@ package legacy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -150,5 +152,47 @@ func TestParseCreatedLocationKeepsContextRoot(t *testing.T) {
 	}
 	if n != 8 || !strings.HasSuffix(got, "/gitbucket/acme/widgets/issues/8") {
 		t.Fatalf("got %d %q", n, got)
+	}
+}
+
+func TestSignInRedirect(t *testing.T) {
+	for _, prefix := range []string{"", "/gitbucket"} {
+		for _, tc := range []struct {
+			name, location string
+			wantAuth       bool
+		}{
+			{"home", "/", false},
+			{"relative home", "./", false},
+			{"signin", "/signin", true},
+			{"relative signin", "signin", true},
+			{"signin query", "/signin?error=1", true},
+			{"signin slash", "/signin/", true},
+			{"absolute signin", "absolute", true},
+			{"invalid", "%", true},
+			{"missing", "", true},
+		} {
+			t.Run(prefix+"/"+tc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet {
+						return
+					}
+					location := tc.location
+					if strings.HasPrefix(location, "/") {
+						location = prefix + location
+					}
+					if location == "absolute" {
+						location = "http://" + r.Host + prefix + "/signin?error=1"
+					}
+					w.Header().Set("Location", location)
+					w.WriteHeader(http.StatusFound)
+				}))
+				defer server.Close()
+				client := newTestClient(t, server.URL+prefix)
+				err := client.SignIn(context.Background())
+				if errors.Is(err, ErrAuth) != tc.wantAuth || (!tc.wantAuth && err != nil) {
+					t.Fatalf("SignIn = %v, want auth failure %v", err, tc.wantAuth)
+				}
+			})
+		}
 	}
 }
