@@ -13,7 +13,7 @@ import (
 )
 
 // Client talks to a legacy GitBucket host through Web forms.
-// It never follows redirects: success is judged only by 302 + Location.
+// It never follows redirects; each operation validates the 302 Location.
 type Client struct {
 	baseURL    *url.URL
 	user       string
@@ -96,6 +96,10 @@ func (c *Client) SignIn(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound || strings.TrimSpace(resp.Header.Get("Location")) == "" {
 		return wrap(ErrAuth, fmt.Sprintf("signin failed: HTTP %d", resp.StatusCode))
+	}
+	location, err := resp.Location()
+	if err != nil || strings.TrimRight(location.Path, "/") == strings.TrimRight(c.baseURL.Path, "/")+"/signin" {
+		return wrap(ErrAuth, "signin failed: invalid redirect or returned to signin")
 	}
 	return nil
 }

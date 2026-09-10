@@ -91,6 +91,8 @@ bkt --repo owner/repo pr create \
 
 `--base`, `--head`, `--base-sha`, and `--head-sha` are required on a legacy host. Short aliases `-B` / `-H` count. Other commands (commit, `pr list` / `view` / `merge` / `checkout`) are unsupported.
 
+`--base-sha` must match the compare form's hidden `commitIdFrom` field. On GitBucket 4.7.1 this is the merge-base of the base and head branches, not necessarily the base branch tip. `--head-sha` must match `commitIdTo` (the head branch tip). Fix these full 40-character lowercase SHAs before invoking the command; for locally fetched branches, `git merge-base <base> <head>` and `git rev-parse <head>` provide the respective values. If either SHA differs from the compare form, the command fails with exit code 5 without creating a pull request.
+
 Legacy exit codes:
 
 | Code | Meaning |

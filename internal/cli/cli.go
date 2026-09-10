@@ -504,7 +504,7 @@ func (r *runner) runPR(ctx context.Context, args []string, g globals) error {
 		fs.StringVar(base, "B", "main", "base branch")
 		head := fs.String("head", "", "head branch")
 		fs.StringVar(head, "H", "", "head branch")
-		baseSHA := fs.String("base-sha", "", "caller-fixed base commit SHA")
+		baseSHA := fs.String("base-sha", "", "caller-fixed compare commitIdFrom (merge-base) SHA")
 		headSHA := fs.String("head-sha", "", "caller-fixed head commit SHA")
 		password := fs.String("password", "", "legacy GitBucket password")
 		web := fs.Bool("web", false, "open in browser")
@@ -758,7 +758,7 @@ func (r *runner) client(ctx context.Context, explicitURL string) (*gitbucket.Cli
 		return nil, config.Resolved{}, err
 	}
 	if resolved.Legacy {
-		return nil, config.Resolved{}, wrapUnsupported("command is not supported on a legacy GitBucket host")
+		return nil, config.Resolved{}, fmt.Errorf("%w on a legacy GitBucket host", legacy.ErrUnsupported)
 	}
 	opts := []gitbucket.Option{}
 	if r.httpClient != nil {
